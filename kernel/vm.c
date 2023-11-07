@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -315,20 +317,25 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
+    
+    // 清除父进程的PTE_W位，设置PTE_C位
+    // 如果父进程是只读页，无需设置PTE_C位
+    if(*pte & PTE_W) {
+      *pte = (*pte & (~PTE_W)) | PTE_C;
+    }
     pa = PTE2PA(*pte);
+
+    kaddref((void *)pa); // 引用加1
+
+    // 子进程不需要内存，指向pa，页表属性为flags
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    if(mappages(new, i, PGSIZE, (uint64)pa, flags) != 0){
       goto err;
     }
   }
@@ -362,14 +369,44 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   pte_t *pte;
 
   while(len > 0){
+    // 查找虚拟地址dstva对应的物理地址pa0
     va0 = PGROUNDDOWN(dstva);
-    if(va0 >= MAXVA)
+    // walkaddr调用了walk
+    pa0 = walkaddr(pagetable, va0); 
+    if(pa0 == 0) // 查找失败
       return -1;
-    pte = walk(pagetable, va0, 0);
-    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 ||
-       (*pte & PTE_W) == 0)
+    
+    if(va0 >= MAXVA || va0 < PGSIZE)
       return -1;
-    pa0 = PTE2PA(*pte);
+    struct proc *p = myproc();
+    if((pte = walk(pagetable, va0, 0))==0) {
+      p->killed = 1;
+      return -1;
+    }
+    // check
+    if ((va0 < p->sz) && (*pte & PTE_V) &&
+            (*pte & PTE_C)&&(*pte & PTE_U)) {
+
+      char refcnt = kgetref((void *)pa0);
+
+      if(refcnt == 1) {
+         *pte = (*pte &(~PTE_C)) | PTE_W;
+      }else if(refcnt > 1){
+        char *mem;
+
+        ksubref((void *)pa0);
+
+        if ((mem = kalloc()) == 0) {
+          p->killed = 1;        
+          return -1;
+        } 
+        memmove(mem, (char*)pa0, PGSIZE);
+        uint flags = PTE_FLAGS(*pte);
+        *pte = (PA2PTE(mem) | flags | PTE_W);
+        *pte &= ~PTE_C;
+        pa0 = (uint64)mem;          
+      }
+    }
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
