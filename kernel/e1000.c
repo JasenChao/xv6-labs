@@ -102,7 +102,23 @@ e1000_transmit(struct mbuf *m)
   // the TX descriptor ring so that the e1000 sends it. Stash
   // a pointer so that it can be freed after sending.
   //
-  
+  acquire(&e1000_lock);
+  int idx = regs[E1000_TDT];                              // 取E1000_TDT寄存器的值作为队列尾部
+  if ((tx_ring[idx].status & E1000_TXD_STAT_DD) == 0) {   // 如果发送已完成，则退出
+    release(&e1000_lock);
+    return -1;
+  }
+
+  if (tx_mbufs[idx]) mbuffree(tx_mbufs[idx]);             // 如果mbuf非空，则释放掉
+
+  tx_mbufs[idx] = m;                                      // mbuf指向需要发送的m
+  tx_ring[idx].length = m->len;
+  tx_ring[idx].addr = (uint64)m->head;
+  tx_ring[idx].css = tx_ring[idx].cso = tx_ring[idx].special = 0;
+  tx_ring[idx].cmd = E1000_TXD_CMD_RS | E1000_TXD_CMD_EOP;
+  regs[E1000_TDT] = (idx + 1) % TX_RING_SIZE;             // 更新寄存器
+
+  release(&e1000_lock);
   return 0;
 }
 
@@ -115,6 +131,18 @@ e1000_recv(void)
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+  int idx = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+  while(rx_ring[idx].status & E1000_RXD_STAT_DD) {
+    rx_mbufs[idx]->len = rx_ring[idx].length;
+    net_rx(rx_mbufs[idx]);                            // mbuf送到上层协议
+
+    // 清空mbuf
+    rx_mbufs[idx] = mbufalloc(0);
+    rx_ring[idx].status = 0;
+    rx_ring[idx].addr = (uint64)rx_mbufs[idx]->head;
+    regs[E1000_RDT] = idx;
+    idx = (idx + 1) % RX_RING_SIZE;
+  }
 }
 
 void
