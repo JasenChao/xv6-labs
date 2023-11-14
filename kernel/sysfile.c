@@ -503,3 +503,75 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64 sys_mmap(void)
+{
+  uint64 addr;
+  int len , prot , flags , fd , off;
+  argaddr(0, &addr);
+  argint(1, &len);
+  argint(2, &prot);
+  argint(3, &flags);
+  argint(4, &fd);
+  argint(5, &off);
+  
+  struct proc* p = myproc();
+  struct file* f = p->ofile[fd];
+  
+  // 检查权限和类型，MAP_SHARED类型对文件的修改会写回外存
+  if(flags == MAP_SHARED && f->writable == 0 && (prot & PROT_WRITE))
+    return -1;
+
+  // 找到一块空的VMA
+  int idx;
+  for(idx = 0; idx < VMA_MAX; idx++)
+    if(p->vma[idx].valid == 0)
+      break;
+
+  if(idx == VMA_MAX)
+    panic("no empty vma field");
+  
+  struct VMA* vp = &p->vma[idx];
+  vp->valid = 1;
+  vp->len = len;
+  vp->flags = flags;
+  vp->off = off;
+  vp->prot = prot;
+  vp->f = f;
+  filedup(f);                       // 保证文件不会被关闭
+  vp->addr = (p->maxaddr -= len);   // len长度的内存分配出来，maxaddr减去len
+  return vp->addr;
+}
+
+uint64 sys_munmap(void)
+{
+  uint64 addr;
+  int len;
+  argaddr(0, &addr);
+  argint(1, &len);
+  struct proc* p = myproc();
+
+  struct VMA* vp = 0;
+  for(int i = 0; i < VMA_MAX; i++)
+    if(p->vma[i].addr <= addr && addr < p->vma[i].addr + p->vma[i].len && p->vma[i].valid == 1){
+      vp = &p->vma[i];
+      break;
+    }
+  if(vp == 0)
+    panic("munmap no such vma");  
+
+  // if the page has been mapped 
+  if(walkaddr(p->pagetable , addr) != 0){
+    // MAP_SHARED类型需要写回
+    if(vp->flags == MAP_SHARED)
+      filewriteoff(vp->f, addr, len, addr-vp->addr);
+    uvmunmap(p->pagetable, addr, len/PGSIZE, 1);
+    return 0;
+  }
+  // 引用计数为0时关闭文件
+  if(0 == (vp->mapcnt -= len)){
+    fileclose(vp->f);
+    vp->valid = 0;
+  }
+  return 0;
+}

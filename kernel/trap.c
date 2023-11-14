@@ -5,6 +5,9 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fs.h"
+#include "sleeplock.h"
+#include "file.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -65,6 +68,31 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(r_scause() == 0xd){
+    uint64 addr = r_stval();
+    struct VMA* vp = 0;
+    // 找到缺页的VMA
+    for(int i = 0; i < VMA_MAX; i++)
+      if(p->vma[i].addr <= addr && addr < p->vma[i].addr + p->vma[i].len && p->vma[i].valid == 1){
+        vp = &p->vma[i];
+        break;
+      }
+    if(vp != 0){
+      uint64 mem = (uint64)kalloc();
+      memset((void*)mem, 0, PGSIZE);
+
+      if(mappages(p->pagetable, addr, PGSIZE, mem, PTE_U | PTE_V | (vp->prot << 1)) == -1)
+        panic("pagefault map error");
+      
+      vp->mapcnt += PGSIZE; //maintain the mapcnt
+      ilock(vp->f->ip);
+      readi(vp->f->ip, 0, mem, addr-vp->addr, PGSIZE); //copy a page of the file from the disk
+      iunlock(vp->f->ip);
+    }else{
+      printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      p->killed = 1;
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {

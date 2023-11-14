@@ -81,6 +81,18 @@ struct trapframe {
 
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+ #define VMA_MAX 16
+ struct VMA{
+   int valid;        //有效位，当值为 0 时表示无效，即为 empty element
+   uint64 addr;      //记录起始地址
+   int len;          //长度
+   int prot;         //权限（read/write）
+   int flags;        //区域类型（shared/private）
+   int off;          //偏移量
+   struct file* f;   //映射的文件
+   uint64 mapcnt;    //（延迟申请）已经映射的页数量
+ };
+
 // Per-process state
 struct proc {
   struct spinlock lock;
@@ -104,4 +116,6 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  struct VMA vma[VMA_MAX];     // VMA
+  uint64 maxaddr;              // heap可用最大地址
 };

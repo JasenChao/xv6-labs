@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
 
 struct cpu cpus[NCPU];
 
@@ -145,6 +146,12 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
+
+  for(int i = 0; i < VMA_MAX; i++){
+    p->vma[i].valid = 0;              // 一开始所有的VMA都是无效的
+    p->vma[i].mapcnt = 0;             // 一开始映射的数量为0
+  }
+  p->maxaddr = MAXVA - 2 * PGSIZE;    // 减去已被使用的trampoline和trapframe的空间
 
   return p;
 }
@@ -322,6 +329,13 @@ fork(void)
   np->state = RUNNABLE;
   release(&np->lock);
 
+  np->maxaddr = p->maxaddr;
+  for(int i = 0; i < VMA_MAX; i++)
+    if(p->vma[i].valid){
+      filedup(p->vma[i].f);
+      memmove(&np->vma[i], &p->vma[i], sizeof(struct VMA));
+    }
+
   return pid;
 }
 
@@ -350,6 +364,21 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  for(int i = 0; i < VMA_MAX; i++){
+    if(p->vma[i].valid == 1){
+      struct VMA* vp = &p->vma[i];
+      for(uint64 addr = vp->addr; addr < vp->addr + vp->len; addr += PGSIZE){
+        if(walkaddr(p->pagetable, addr) != 0){
+          if(vp->flags == MAP_SHARED)
+            filewriteoff(vp->f, addr, PGSIZE, addr-vp->addr);
+          uvmunmap(p->pagetable, addr, 1, 1);
+        }
+      }
+      fileclose(p->vma[i].f);
+      p->vma[i].valid = 0;
+    }
+  }
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
